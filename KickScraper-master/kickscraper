@@ -1,0 +1,228 @@
+#!/usr/bin/env node
+
+var assert      = require('assert'),
+    color       = require('cli-color'),
+    fs          = require('fs'),
+    config      = require('./config'),
+    KickStarter = require('./kickstarter'),
+    DB          = require('./db'),
+    Map         = require('./map'),
+    debug       = false,
+    log         = false;
+
+// ==========
+// = Timers =
+// ==========
+
+// Fetch the latest pledges
+setInterval(function() {
+
+  var ks    = new KickStarter(),
+      db    = new DB(),
+      count = 0;
+
+  ks.debug = debug;
+  db.debug = debug;
+
+  db.on('ready', function() {
+
+    ks.login()
+      .then(function() {
+        return ks.get_backers();
+      })
+      .then(function(backers) {
+        assert.notEqual(0, backers.length, 'No backers found');
+        return backers;
+      })
+      .then(function(backers) {
+        db.process_backers(backers);
+      })
+      .then(function() {
+        return ks.logout();
+      })
+      .fail(function(error) {
+        ks.logout();
+        db.close();
+        ks.emit('error', error);
+      });
+
+  });
+
+  db.on('processing_backers', function(c) {
+
+    count = c;
+
+    if(count == 0)
+      db.close();
+
+  });
+
+  db.on('skipping_backer', function(backer) {
+
+    count--;
+
+    if(count == 0)
+      db.close();
+
+  });
+
+  db.on('added_backer', function(backer) {
+
+    count--;
+
+    if(count == 0)
+      db.close();
+
+  });
+
+}, config.timers.pledges);
+
+// Render the map
+setInterval(function() {
+
+  var map = new Map();
+      map.debug = debug;
+      map.generate();
+
+}, config.timers.map);
+
+// Message new backers
+setInterval(function() {
+
+  var db = new DB();
+      db.debug = debug;
+
+  db.on('ready', function(collection) {
+    db.check_new();
+  });
+
+  db.on('found_new', function(backer) {
+
+    var ks = new KickStarter();
+        ks.debug = debug;
+
+    ks.login()
+      .then(function() {
+        return ks.send_message(
+          backer.user,
+          config.templates.vote_message(backer)
+        );
+      })
+      .then(function() {
+        db.messaged(backer.user);
+      })
+      .then(function() {
+        ks.logout();
+      })
+      .fail(function(error) {
+        ks.logout();
+        db.close();
+        ks.emit('error', error);
+      });
+
+  });
+
+  db.on('message_marked', function() {
+    db.close();
+  });
+
+  db.on('no_new', function() {
+    db.close();
+  });
+
+}, config.timers.message);
+
+// ========================
+// = Command Line Options =
+// ========================
+
+process.argv.forEach(function(val, index, array) {
+
+  if(val == '--debug') {
+    debug = true;
+  }
+
+  if(val == '--log') {
+    log = true;
+  }
+
+});
+
+// =======================
+// = Debugging & Logging =
+// =======================
+
+var con_log = console.log,
+    con_err = console.error;
+
+var out_log = fs.createWriteStream(config.log.out, {flags: 'a', encoding: null, mode: 0666}),
+    err_log = fs.createWriteStream(config.log.err, {flags: 'a', encoding: null, mode: 0666});
+
+console.log = function() {
+
+  var messages = [];
+
+  var prefix = color.white('[' + config.timestamp() + '] ');
+
+  while(arguments.length) {
+    messages.push(prefix + [].shift.call(arguments));
+  }
+
+  if(log) {
+    messages.forEach(function(message) {
+      out_log.write(message + "\n");
+    });
+  }
+
+  if(debug) {
+    con_log.apply(console, messages);
+  }
+
+};
+
+console.error = function() {
+
+  var messages = [];
+
+  var prefix = color.red('[' + config.timestamp() + '] ');
+
+  while(arguments.length) {
+    messages.push(prefix + [].shift.call(arguments));
+  }
+
+  if(log) {
+    messages.forEach(function(message) {
+      err_log.write(message + "\n");
+    });
+  }
+
+  if(debug) {
+    con_err.apply(console, messages);
+  }
+
+};
+
+// ======================
+// = Process Monitoring =
+// ======================
+console.log(color.white.bold.underline('KickScraper Start'));
+
+process.on('uncaughtException', function(err) {
+  console.error(err);
+  process.exit();
+});
+
+process.on('SIGINT', function() {
+  console.log(color.white.bold.underline('User Requested Quit'));
+  process.exit();
+});
+
+process.on('SIGHUP', function() {
+  console.log(color.white.bold.underline('SIGHUP Received'));
+  process.exit();
+});
+
+process.on('exit', function() {
+  console.log(color.white.bold.underline('KickScraper Quit'));
+});
+
